@@ -38,7 +38,6 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# Project specific
-# Only exclude temporary/cache files, not documentation
-*.log
-*.tmp
+# Documentation files - exclude all .md files except README.md
+*.md
+!README.md
