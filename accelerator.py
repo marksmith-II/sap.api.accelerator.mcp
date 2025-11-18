@@ -56,7 +56,6 @@ def format_package_list_entry(entry: Dict[str, Any]) -> str:
     This is for the list_sap_content_packages tool.
     """
     # Keys are based on the OData XML sample provided
-    # <d:TechnicalName>
     technical_name = entry.get('TechnicalName', 'UNKNOWN_ID')
     display_name = entry.get('DisplayName', 'Unknown Display Name')
     version = entry.get('Version', 'N/A')
@@ -82,13 +81,16 @@ Display Name: {display_name}
 Description: {description.strip()}"""
 
 @mcp.tool()
-async def list_sap_content_packages() -> str:
+async def list_sap_content_packages(search_term: str = None) -> str:
     """
-    Fetches a list of ALL available Content Packages from the SAP Business Accelerator Hub.
-    Uses $select to only fetch necessary fields to avoid timeouts.
+    Fetches a list of Content Packages from the SAP Business Accelerator Hub.
+    
+    Args:
+        search_term: Optional keyword to filter packages (e.g., "S/4HANA", "Integration", "Public Edition").
+                     Searches both the Display Name and Technical ID.
     """
     
-    print("Querying SAP API for ALL Content Packages...")
+    print(f"Querying SAP API for Content Packages. Filter: {search_term if search_term else 'None'}")
     # Use $select to only get the fields we need.
     # This is the key to getting all items without a timeout.
     params = {
@@ -109,7 +111,20 @@ async def list_sap_content_packages() -> str:
     if not results:
         return "No content packages found or response format was unexpected."
 
-    print(f"Found {len(results)} total entries.")
+    # --- FILTERING LOGIC ---
+    if search_term:
+        term = search_term.lower()
+        # Filter results where the term appears in DisplayName OR TechnicalName
+        results = [
+            entry for entry in results 
+            if term in entry.get('DisplayName', '').lower() 
+            or term in entry.get('TechnicalName', '').lower()
+        ]
+        
+        if not results:
+            return f"No content packages found matching the search term: '{search_term}'"
+
+    print(f"Found {len(results)} entries matching filter.")
     # Format each entry and join with a clear separator
     formatted_entries = [format_package_list_entry(entry) for entry in results]
     
@@ -117,18 +132,17 @@ async def list_sap_content_packages() -> str:
 
 
 @mcp.tool()
-async def get_sap_package_artifacts(package_id: str) -> str:
+async def get_sap_package_artifacts(package_id: str, artifact_type: str = None) -> str:
     """
-    Get all artifacts (details) for a specific Content Package.
+    Get artifacts (details) for a specific Content Package.
 
     Args:
         package_id: The Technical ID of the package (e.g., 'TSC_InvoiceToCashOilAndGasMbp405').
-                    You can get this ID from the 'list_sap_content_packages' tool.
+        artifact_type: Optional filter for the type of artifact (e.g., "IntegrationFlow", "ValueMapping", "Script").
     """
-    print(f"Querying SAP API for artifacts in package: {package_id}")
+    print(f"Querying SAP API for artifacts in package: {package_id}. Filter Type: {artifact_type if artifact_type else 'None'}")
     
     # Construct the URL to get artifacts for a specific package
-    # e.g., .../ContentPackages('MyPackageID')/Artifacts
     url = f"{CONTENT_PACKAGES_URL}('{package_id}')/Artifacts"
     
     # We don't need $select here, as we want all artifact details
@@ -145,6 +159,17 @@ async def get_sap_package_artifacts(package_id: str) -> str:
     
     if not results:
         return f"No artifacts found for package: {package_id}"
+
+    # --- FILTERING LOGIC ---
+    if artifact_type:
+        term = artifact_type.lower()
+        results = [
+            entry for entry in results
+            if term in entry.get('Type', '').lower()
+        ]
+        
+        if not results:
+            return f"No artifacts found in package '{package_id}' matching type: '{artifact_type}'"
 
     print(f"Found {len(results)} artifacts.")
     # Format each entry and join with a clear separator
