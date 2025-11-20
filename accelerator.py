@@ -166,27 +166,67 @@ async def list_sap_content_packages(search_term: Optional[str] = None, max_resul
     # This is the key to getting all items without a timeout.
     params = {
         "$select": "TechnicalName,DisplayName,Version",
-        "$top": str(max_results)
+        "$top": str(max_results * 10 if search_term else max_results)  # Fetch more if filtering client-side
     }
     
-    # Add OData filter if search_term provided
+    # Try OData filter if search_term provided
     # Use substringof for OData v2 compatibility (SAP API uses OData v2)
     if search_term:
         safe_term = escape_odata_string(search_term)
         params["$filter"] = f"(substringof('{safe_term}',DisplayName) eq true or substringof('{safe_term}',TechnicalName) eq true)"
     
-    data = await make_sap_api_request(CONTENT_PACKAGES_URL, params=params)
+    data = await make_sap_api_request(CONTENT_PACKAGES_URL, params=params, return_error=True)
     
     if not data:
-        return "Unable to fetch content packages."
-
-    results: Optional[List[Dict[str, Any]]] = None
-    if 'd' in data and 'results' in data['d']:
-        results = data['d']['results']  # OData v2
-    elif 'value' in data:
-        results = data['value']  # OData v4
+        return "Unable to fetch content packages. Please check the server logs for detailed error information."
+    
+    # Check if we got an error response (filter might not be supported)
+    if 'error' in data:
+        error_details = data.get('error', 'Unknown error')
+        status_code = data.get('status_code', 'N/A')
+        
+        # If filter failed, try fetching all and filtering client-side
+        if status_code == 400 and search_term:
+            logger.warning(f"OData filter not supported. Fetching all packages and filtering client-side...")
+            
+            # Fetch without filter
+            fetch_params = {
+                "$select": "TechnicalName,DisplayName,Version",
+                "$top": str(max_results * 10)  # Fetch more to account for client-side filtering
+            }
+            
+            data = await make_sap_api_request(CONTENT_PACKAGES_URL, params=fetch_params, return_error=True)
+            
+            if not data or 'error' in data:
+                return f"Unable to fetch content packages. Error: {data.get('error', 'Unknown error') if data else 'No response'}"
+            
+            # Filter client-side
+            results: Optional[List[Dict[str, Any]]] = None
+            if 'd' in data and 'results' in data['d']:
+                results = data['d']['results']  # OData v2
+            elif 'value' in data:
+                results = data['value']  # OData v4
+            
+            if results:
+                search_lower = search_term.lower()
+                results = [
+                    r for r in results 
+                    if search_lower in r.get('DisplayName', '').lower() or search_lower in r.get('TechnicalName', '').lower()
+                ]
+                results = results[:max_results]  # Limit to max_results
+        else:
+            return f"Unable to fetch content packages. Error: {error_details} (Status: {status_code})"
+    else:
+        # Normal response processing
+        results: Optional[List[Dict[str, Any]]] = None
+        if 'd' in data and 'results' in data['d']:
+            results = data['d']['results']  # OData v2
+        elif 'value' in data:
+            results = data['value']  # OData v4
     
     if not results:
+        if search_term:
+            return f"No content packages found matching '{search_term}'. Try searching without a filter to see all available packages."
         return "No content packages found or response format was unexpected."
 
     logger.info(f"Found {len(results)} entries matching filter.")

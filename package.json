@@ -1,0 +1,14 @@
+{
+  "name": "sap-api-accelerator-mcp",
+  "version": "1.0.0",
+  "description": "SAP API Accelerator MCP Server",
+  "scripts": {
+    "test": "concurrently --names \"SERVER,INSPECTOR\" --prefix-colors \"blue,green\" \"uv run accelerator.py\" \"npx @mcpjam/inspector@latest\"",
+    "server": "uv run accelerator.py",
+    "inspector": "npx @mcpjam/inspector@latest"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
+
