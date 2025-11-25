@@ -296,37 +296,100 @@ async def get_sap_artifact_details(artifact_name: str, artifact_type: str = "API
     if not packages:
         return f"Unable to fetch artifact details for: {artifact_name} (Type: {artifact_type}). No packages available to search."
     
-    logger.info(f"Searching for artifact in {len(packages)} packages...")
+    logger.info(f"Searching for artifact in {len(packages)} packages using concurrent requests...")
     
-    # Search through all packages
-    for i, package in enumerate(packages):
+    # Use concurrent requests with early termination
+    # Limit concurrency to avoid overwhelming the API
+    MAX_CONCURRENT = 20
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+    found_artifact = None
+    found_event = asyncio.Event()
+    tasks = []
+    
+    async def search_package_artifacts(package: Dict[str, Any], index: int) -> Optional[Dict[str, Any]]:
+        """Search for artifact in a single package. Returns artifact if found, None otherwise."""
+        # Early termination check
+        if found_event.is_set():
+            return None
+        
         package_id = package.get('TechnicalName', '')
         if not package_id:
-            continue
+            return None
         
-        # Log progress every 10 packages to avoid too much logging
-        if (i + 1) % 10 == 0 or i == 0:
-            logger.info(f"Searching package {i+1}/{len(packages)}: {package_id}")
-        
-        # Fetch artifacts from this package
-        package_artifacts_url = f"{CONTENT_PACKAGES_URL}('{escape_odata_string(package_id)}')/Artifacts"
-        package_artifacts_params = {
-            "$format": "json",
-            "$top": "1000",  # Get all artifacts from this package
-            "$select": "Name,DisplayName,Type,SubType,Version,State,Description,reg_id,CreatedAt,ModifiedAt"
-        }
-        
-        package_artifacts_data = await make_sap_api_request(package_artifacts_url, params=package_artifacts_params, return_error=True)
-        
-        if package_artifacts_data and 'error' not in package_artifacts_data:
-            package_artifacts = package_artifacts_data.get('value') or package_artifacts_data.get('d', {}).get('results', [])
+        async with semaphore:
+            # Double-check early termination after acquiring semaphore
+            if found_event.is_set():
+                return None
             
-            # Search for exact match (case-insensitive)
-            for artifact in package_artifacts:
-                if (artifact.get('Name', '').upper() == artifact_name.upper() and 
-                    artifact.get('Type', '').upper() == artifact_type.upper()):
-                    logger.info(f"Found artifact '{artifact_name}' in package '{package_id}' (searched {i+1} packages)")
-                    return format_artifact_detailed(artifact)
+            # Log progress periodically
+            if (index + 1) % 50 == 0 or index == 0:
+                logger.info(f"Searching package {index+1}/{len(packages)}: {package_id}")
+            
+            # Fetch artifacts from this package
+            package_artifacts_url = f"{CONTENT_PACKAGES_URL}('{escape_odata_string(package_id)}')/Artifacts"
+            package_artifacts_params = {
+                "$format": "json",
+                "$top": "1000",  # Get all artifacts from this package
+                "$select": "Name,DisplayName,Type,SubType,Version,State,Description,reg_id,CreatedAt,ModifiedAt"
+            }
+            
+            package_artifacts_data = await make_sap_api_request(package_artifacts_url, params=package_artifacts_params, return_error=True)
+            
+            if package_artifacts_data and 'error' not in package_artifacts_data:
+                package_artifacts = package_artifacts_data.get('value') or package_artifacts_data.get('d', {}).get('results', [])
+                
+                # Search for exact match (case-insensitive)
+                for artifact in package_artifacts:
+                    if found_event.is_set():
+                        return None
+                    
+                    if (artifact.get('Name', '').upper() == artifact_name.upper() and 
+                        artifact.get('Type', '').upper() == artifact_type.upper()):
+                        logger.info(f"Found artifact '{artifact_name}' in package '{package_id}' (searched {index+1} packages)")
+                        return artifact
+            
+            return None
+    
+    # Create tasks for all packages
+    for i, package in enumerate(packages):
+        task = asyncio.create_task(search_package_artifacts(package, i))
+        tasks.append(task)
+    
+    # Wait for first result or all tasks to complete
+    try:
+        # Use as_completed to get results as they arrive
+        for coro in asyncio.as_completed(tasks):
+            try:
+                result = await coro
+                if result is not None:
+                    # Found the artifact - signal early termination
+                    found_event.set()
+                    found_artifact = result
+                    
+                    # Cancel remaining tasks
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    
+                    # Wait for cancellations to complete (with timeout)
+                    if tasks:
+                        await asyncio.wait(tasks, timeout=1.0, return_when=asyncio.ALL_COMPLETED)
+                    break
+            except asyncio.CancelledError:
+                # Task was cancelled, continue to next
+                continue
+    except Exception as e:
+        logger.warning(f"Error during concurrent search: {e}")
+        # Cancel all remaining tasks
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        # Wait for cancellations
+        if tasks:
+            await asyncio.wait(tasks, timeout=1.0, return_when=asyncio.ALL_COMPLETED)
+    
+    if found_artifact:
+        return format_artifact_detailed(found_artifact)
     
     return f"Artifact not found: {artifact_name} (Type: {artifact_type}). Searched {len(packages)} packages but no exact match found. Verify the artifact name and type are correct."
 
